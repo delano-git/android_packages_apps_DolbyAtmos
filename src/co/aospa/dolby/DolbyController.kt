@@ -84,8 +84,45 @@ internal class DolbyController private constructor(private val context: Context)
             dolbyEffect.profile = value
         }
 
+    // The effect dies with audioserver (e.g. after an audio HAL crash), so
+    // recreate it and restore our settings once audioserver is back up.
+    private val audioServerStateCallback =
+        object : AudioManager.AudioServerStateCallback() {
+            override fun onAudioServerUp() {
+                Log.w(TAG, "audioserver restarted, restoring dolby")
+                restoreAfterAudioServerRestart(attempt = 1)
+            }
+        }
+
     init {
         dlog(TAG, "initialized")
+        try {
+            audioManager.setAudioServerStateCallback(
+                context.mainExecutor,
+                audioServerStateCallback,
+            )
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "Failed to register audioserver state callback", e)
+        }
+    }
+
+    private fun restoreAfterAudioServerRestart(attempt: Int) {
+        try {
+            dolbyEffect.release()
+            dolbyEffect = DolbyAudioEffect(EFFECT_PRIORITY, audioSession = 0)
+            onBootCompleted()
+        } catch (e: RuntimeException) {
+            // The audio HAL may still be coming up, try again shortly.
+            if (attempt >= RESTORE_MAX_ATTEMPTS) {
+                Log.e(TAG, "Failed to restore dolby after audioserver restart", e)
+                return
+            }
+            Log.w(TAG, "Dolby effect not ready (attempt $attempt), retrying")
+            handler.postDelayed(
+                { restoreAfterAudioServerRestart(attempt + 1) },
+                RESTORE_RETRY_DELAY_MS,
+            )
+        }
     }
 
     fun onBootCompleted() {
@@ -304,6 +341,8 @@ internal class DolbyController private constructor(private val context: Context)
     companion object {
         private const val TAG = "DolbyController"
         private const val EFFECT_PRIORITY = 100
+        private const val RESTORE_MAX_ATTEMPTS = 10
+        private const val RESTORE_RETRY_DELAY_MS = 2000L
 
         @Volatile private var instance: DolbyController? = null
 
